@@ -6,9 +6,10 @@ import tensorflow as tf
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.layers import LSTM, Bidirectional, Dense, Embedding, TimeDistributed, RepeatVector
+from tensorflow.keras.layers import LSTM, Bidirectional, Dense, Embedding, TimeDistributed, RepeatVector, Input, Dropout, GlobalAveragePooling1D
 from tensorflow.keras import Model, Sequential
 from sklearn.model_selection import train_test_split
+from transformer import Transformer, Embed
 from nltk.translate.bleu_score import corpus_bleu
 
 
@@ -62,15 +63,6 @@ def encode_outs(sequences, vocab_size):
     y = y.reshape(sequences.shape[0], sequences.shape[1], vocab_size)
     return y
 
-def build_model(src_vocab, tgt_vocab, src_timesteps, tgt_timesteps, n_units):
-    model = Sequential()
-    model.add(Embedding(src_vocab, n_units, input_length=src_timesteps, mask_zero=True))
-    model.add(Bidirectional(LSTM(n_units)))
-    model.add(RepeatVector(tgt_timesteps))
-    model.add(Bidirectional(LSTM(n_units, return_sequences=True)))
-    model.add(TimeDistributed(Dense(tgt_vocab, activation='softmax')))
-    return model
-
 def word_for_id(integer, tokenizer):
     for word, index in tokenizer.word_index.items():
         if index == integer:
@@ -103,6 +95,30 @@ def eval_model(model, tokenizer, source, raw_dataset):
     print(f'BLEU Score 3: {corpus_bleu(actual, pred, weights=(0.3, 0.3, 0.3, 0))}')
     print(f'BLEU Score 4: {corpus_bleu(actual, pred, weights=(0.25, 0.25, 0.25, 0.25))}')
 
+def build_model(src_vocab, tgt_vocab, src_timesteps, tgt_timesteps, n_units):
+    model = Sequential()
+    model.add(Embedding(src_vocab, n_units, input_length=src_timesteps, mask_zero=True))
+    model.add(Bidirectional(LSTM(n_units)))
+    model.add(RepeatVector(tgt_timesteps))
+    model.add(Bidirectional(LSTM(n_units, return_sequences=True)))
+    model.add(TimeDistributed(Dense(tgt_vocab, activation='softmax')))
+    return model
+
+def build_transformer(maxlen, eng_len, vocab_size, embed_dim, ff_dim, num_heads, tgt_vocab):
+    t = Transformer(embed_dim, num_heads, ff_dim, rate=0.3)
+    e = Embed(maxlen, vocab_size, embed_dim)
+
+    inputs = Input(shape=(maxlen,))
+    x = e(inputs)
+    x = t(x)
+    x = GlobalAveragePooling1D()(x)
+    x = Dropout(0.2)(x)
+    x = Dense(256, activation='relu')(x)
+    x = RepeatVector(eng_len)(x)
+    x = Dense(128, activation='relu')(x)
+    outputs = Dense(tgt_vocab, activation='softmax')(x)
+    return Model(inputs, outputs, name='transformer')
+
 
 if __name__ == '__main__':
     clean = clean_data(load_data())
@@ -130,10 +146,23 @@ if __name__ == '__main__':
     testy = encode_seqs(eng_tokenizer, eng_max_length, test[:, 0])
     # testy = encode_outs(testy, eng_vocab_size)
 
-    print(trainy.shape)
-    model = build_model(deu_vocab_size, eng_vocab_size, deu_max_length, eng_max_length, 256)
+    # model = build_model(deu_vocab_size, eng_vocab_size, deu_max_length, eng_max_length, 256)
+    # model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+    # history = model.fit(trainx, trainy, batch_size=128, epochs=30, validation_data=(testx, testy), verbose=1)
+
+    model = build_transformer(
+        maxlen=deu_max_length, 
+        eng_len=eng_max_length, 
+        vocab_size=deu_vocab_size, 
+        embed_dim=256, 
+        ff_dim=256, 
+        num_heads=8, 
+        tgt_vocab=eng_vocab_size
+    )
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
-    history = model.fit(trainx, trainy, batch_size=256, epochs=30, validation_data=(testx, testy), verbose=1)
+    print(trainy.shape, trainx.shape)
+    print(model.summary())
+    history = model.fit(trainx, trainy, batch_size=128, epochs=30, validation_data=(testx, testy), verbose=1)
 
     print('TRAIN')
     eval_model(model, eng_tokenizer, trainx, train)
